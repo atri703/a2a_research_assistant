@@ -1,60 +1,81 @@
 # A2A Research Assistant
 
-A modular research-paper assistant built with **Python, LangGraph, OpenAI, Redis, FastAPI, OpenAlex, and an A2A-ready integration boundary**.
+A modular research-paper assistant built with **Python, LangGraph, OpenAI, Redis, FastAPI, OpenAlex and A2A 1.0**.
 
-## What it does
-
-The system takes a research topic, creates a paper plan, retrieves academic sources, writes requested sections, reviews them, and automatically revises weak sections before moving forward.
+## Architecture
 
 ```text
-User / A2A Client
-       |
-       v
+A2A Client / REST Client
+        |
+        v
 Research Supervisor
-       |
-       v
-LangGraph Workflow
-       |
-       +--> Planner Agent
-       +--> Research Agent ----> OpenAlex
-       +--> Section Writer ----> OpenAI
-       +--> Reviewer Agent ----> OpenAI
-       |
-       v
-Redis State / Memory
+        |
+        v
+LangGraph
+  |       |        |
+  v       v        v
+Research Writer  Reviewer
+ Agent    Agent    Agent
+  |                  |
+OpenAlex            OpenAI
+        \            /
+             Redis
 ```
 
-## Current architecture
+The supervisor is the entry point and delegates work to specialist subagents. LangGraph controls routing, revision loops and section progression.
 
-- **PlannerAgent**: converts a topic into a structured paper plan.
-- **ResearchAgent**: retrieves academic evidence through a provider interface. OpenAlex is the first implementation.
-- **SectionWriterAgent**: generic writer for Abstract, Introduction, Literature Review, Methodology, Results, Discussion, and Conclusion.
-- **ReviewerAgent**: scores each section and returns revision feedback.
-- **LangGraph**: orchestrates plan -> research -> write -> review -> revise/advance.
-- **Redis**: stores project workflow state today.
-- **A2A boundary**: Agent Card and transport-specific code are isolated under `app/a2a/` so A2A execution can evolve independently.
+## Features
+
+- LangGraph supervisor workflow
+- OpenAI Responses API
+- Research, writer and reviewer subagents
+- OpenAlex literature search provider
+- Redis workflow/project memory
+- Review-and-revision loop
+- A2A 1.0 `AgentExecutor` + JSON-RPC server
+- FastAPI REST endpoint
+- Pydantic structured outputs
+- Docker-ready layout
+- Interfaces for future LLM, research and persistence backends
 
 ## Project structure
 
 ```text
 app/
-├── a2a/          # Agent Card and A2A boundary
-├── agents/       # Planner, researcher, writer, reviewer
-├── graph/        # LangGraph state + workflow
-├── llm/          # LLM abstraction + OpenAI implementation
-├── memory/       # Memory abstraction + Redis
-├── research/     # Academic source providers
-├── schemas/      # Shared Pydantic models
-├── config.py
+├── a2a/
+│   ├── executor.py   # A2A -> LangGraph bridge
+│   ├── server.py     # A2A JSON-RPC server
+│   ├── card.py
+│   └── service.py
+├── agents/
+│   ├── planner.py
+│   ├── researcher.py
+│   ├── writer.py
+│   └── reviewer.py
+├── graph/
+│   ├── state.py
+│   └── workflow.py
+├── llm/
+├── memory/
+├── research/
+├── schemas/
 ├── dependencies.py
 └── main.py
 ```
 
-## Design principles
+## Workflow
 
-The project deliberately separates orchestration, agents, LLM provider, research provider, persistence, and A2A transport. This makes it easy to add Semantic Scholar/Crossref/PubMed, PostgreSQL/pgvector, alternative OpenAI models, more specialized agents, or remote A2A workers later.
-
-The generic writer is reused for all sections instead of creating one agent per section. Source-dependent claims must use evidence supplied by the ResearchAgent and internal citation markers such as `[CITE:SOURCE_ID]`. The prompts explicitly prohibit fabricated citations, experiments, data, and results.
+```text
+Request
+  -> Plan
+  -> Research
+  -> Write section
+  -> Review
+       -> revise if rejected
+       -> advance if approved/max retries
+  -> next section
+  -> complete
+```
 
 ## Setup
 
@@ -62,15 +83,10 @@ The generic writer is reused for all sections instead of creating one agent per 
 git clone https://github.com/atri703/a2a_research_assistant.git
 cd a2a_research_assistant
 python -m venv .venv
-```
-
-Activate the environment and install dependencies:
-
-```bash
 pip install -r requirements.txt
 ```
 
-Create `.env` from `.env.example` and set:
+Create `.env` from `.env.example`:
 
 ```env
 OPENAI_API_KEY=your-key
@@ -84,81 +100,72 @@ Start Redis:
 docker compose up redis -d
 ```
 
-Start the API:
+## Run REST API
 
 ```bash
-uvicorn app.main:app --reload
+uvicorn app.main:app --reload --port 8000
 ```
 
-OpenAPI docs are available at `http://localhost:8000/docs`.
+REST endpoint:
 
-## Example request
+```text
+POST /research
+```
+
+Example body:
+
+```json
+{
+  "topic": "Impact of social networking on academic outcomes and mental health among university students",
+  "citation_style": "APA 7",
+  "target_word_count": 5000,
+  "sections": ["introduction", "literature_review", "methodology", "discussion", "conclusion"]
+}
+```
+
+## Run as an A2A agent
 
 ```bash
-curl -X POST http://localhost:8000/research \
-  -H "Content-Type: application/json" \
-  -d '{
-    "topic": "Impact of social networking on academic outcomes and mental health among university students",
-    "citation_style": "APA 7",
-    "target_word_count": 5000,
-    "sections": ["introduction", "literature_review", "methodology", "discussion", "conclusion"]
-  }'
+python -m app.a2a.server
 ```
 
-## A2A
+The A2A server listens on port `9999` and exposes discovery plus JSON-RPC routes. A client can send either plain text (treated as the research topic) or JSON matching `ResearchRequest`.
 
-The MVP exposes an Agent Card at:
+## Modularity / future enhancements
 
-```text
-GET /.well-known/agent-card.json
-```
+The code separates `LLMService`, `ResearchProvider`, and `MemoryStore`, so implementations can be replaced without changing the graph.
 
-The intended future topology is:
+Recommended next additions:
 
-```text
-Supervisor A2A Agent
-       |
-       +---- A2A ----> Research Agent
-       +---- A2A ----> Writer Agent
-       +---- A2A ----> Reviewer Agent
-```
-
-The code already isolates `app/a2a/` so an official A2A SDK `AgentExecutor` and remote sub-agent clients can be added without rewriting the LangGraph workflow.
+1. Make ResearchAgent, WriterAgent and ReviewerAgent independently hosted A2A services; the current supervisor already delegates to them as modular subagents, while A2A is exposed at the supervisor boundary.
+2. Add Semantic Scholar, Crossref, PubMed and arXiv providers.
+3. Add full-text/abstract evidence extraction and evidence chunking.
+4. Add a deterministic citation manager and claim-to-source verifier.
+5. Move durable project data to PostgreSQL and semantic memory to pgvector, keeping Redis for short-lived state/cache/locks.
+6. Add LangGraph human-approval checkpoints.
+7. Add a dataset-analysis agent so Results sections are generated only from real supplied data.
+8. Add DOCX/PDF/LaTeX exporters.
+9. Add auth, rate limits, tracing and stronger integration tests.
 
 ## Memory roadmap
 
+```text
 Today:
-
-```text
 Redis -> workflow/project state
+
+Future:
+Redis      -> transient state/cache/locks
+PostgreSQL -> durable projects/tasks/papers/audit trail
+pgvector   -> evidence + semantic long-term memory
+Object Store -> PDFs, datasets and exports
 ```
 
-Recommended production evolution:
+## Safety against fake research
 
-```text
-Redis      -> short-lived state, cache, locks
-PostgreSQL -> users, projects, tasks, final papers, audit trail
-pgvector   -> long-term semantic memory and evidence retrieval
-Object store -> uploaded PDFs, datasets, generated DOCX/PDF/LaTeX
-```
-
-## Recommended next enhancements
-
-1. Full A2A SDK `AgentExecutor` for supervisor and remote sub-agents.
-2. Semantic Scholar, Crossref, PubMed and arXiv providers.
-3. Abstract/full-text extraction and evidence chunking.
-4. Deterministic citation formatter for APA/IEEE/Harvard/Vancouver.
-5. Claim-to-source citation verifier.
-6. PostgreSQL + pgvector persistent memory.
-7. Human approval checkpoints in LangGraph.
-8. Dataset analysis agent for genuine Results sections.
-9. DOCX/PDF/LaTeX export.
-10. Authentication, rate limiting, tracing and richer tests.
+The writer is instructed to use only supplied evidence for source-dependent claims, emit internal citation markers like `[CITE:SOURCE_ID]`, and never fabricate references, data, experiments or results. Results should eventually be produced by a dedicated analysis agent from real data.
 
 ## Tests
 
 ```bash
 pytest
 ```
-
-The current test verifies that the A2A Agent Card advertises the research-paper skill.
